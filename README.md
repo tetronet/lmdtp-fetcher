@@ -24,5 +24,5 @@ ws://192.168.0.121:30500/
 8080
 30000
 268435456
-```\
+```
 NOTE: don't forget to swap 192.168.0.121 with your actual CIAS for the Tetronet. Protocol is always RAWWS.
