@@ -10,7 +10,7 @@ Console.WriteLine("LMDTP Fetcher");
 
 string[] config = File.ReadAllLines("config.txt");
 string cias = config[0];
-string httpListenerPrefix = config[1];
+int httpPort = int.Parse(config[1]);
 int lmdtpClientTimeoutMs = int.Parse(config[2]);
 int maxData = int.Parse(config[3]);
 
@@ -22,7 +22,7 @@ Console.WriteLine($"\n[EVENT]: The modem is connected to the tetronet with local
 
 Console.WriteLine("[INFO]: HttpListener is going to be created");
 var builder = WebApplication.CreateSlimBuilder(args);
-builder.WebHost.ConfigureKestrel(o => o.ListenAnyIP(8080));
+builder.WebHost.ConfigureKestrel(o => o.ListenAnyIP(httpPort));
 var app = builder.Build();
 Console.WriteLine("[SUCCESS]: HttpListener is created");
 
