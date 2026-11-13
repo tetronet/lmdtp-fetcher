@@ -1,10 +1,12 @@
-// See https://aka.ms/new-console-template for more information
+﻿// See https://aka.ms/new-console-template for more information
+using LMDTP_Fetcher;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.StaticFiles;
 using ModemAPI;
 using System.Diagnostics;
+using System.IO.Pipelines;
 
 Console.WriteLine("LMDTP Fetcher");
 
@@ -13,6 +15,14 @@ string cias = config[0];
 int httpPort = int.Parse(config[1]);
 int lmdtpClientTimeoutMs = int.Parse(config[2]);
 int maxData = int.Parse(config[3]);
+// optional: line 5 - address of the UNNRP server for resolving names (freeuname.org etc.), line 6 - its timeout in ms
+Address? unnrpServer = config.Length > 4 && !string.IsNullOrWhiteSpace(config[4]) ? new Address(config[4].Trim()) : null;
+int unnrpTimeoutMs = config.Length > 5 && !string.IsNullOrWhiteSpace(config[5]) ? int.Parse(config[5]) : 5000;
+if (unnrpServer != null && (!Address.Validate(unnrpServer) || unnrpServer.IsEmpty))
+{
+    Console.WriteLine($"[ERROR]: '{config[4].Trim()}' in config.txt (line 5) isn't a valid tetronet address of a UNNRP server");
+    return;
+}
 
 VirtualModem mdm = new(cias, new(), rawWs:true);
 mdm.Dial();
@@ -22,23 +32,78 @@ Console.WriteLine($"\n[EVENT]: The modem is connected to the tetronet with local
 
 Console.WriteLine("[INFO]: HttpListener is going to be created");
 var builder = WebApplication.CreateSlimBuilder(args);
-builder.WebHost.ConfigureKestrel(o => o.ListenAnyIP(httpPort));
+builder.WebHost.ConfigureKestrel(o =>
+{
+    o.ListenAnyIP(httpPort);
+    // POST bodies up to 200 MB (+ room for a small header); Kestrel's default is ~28.6 MB
+    o.Limits.MaxRequestBodySize = 200L * 1024 * 1024 + 64 * 1024;
+});
 var app = builder.Build();
 Console.WriteLine("[SUCCESS]: HttpListener is created");
+
+Console.WriteLine("[INFO]: LMDTPServer is going to be created");
+LMDTPServer server = new(mdm, 1000000000, 1200000000, [], false, 20000000, 100000);
+server.SrtpEnablePacketLossBasedRateLimiter = true;
+server.PacketMaxLength = 32768;
+POSTRequestResourceProvider resprov = new();
+server.ResourceProvider = resprov;
+server.Start();
+Console.WriteLine("[INFO]: LMDTPServer was created");
+Console.WriteLine("[INFO]: NLMNPClient is going to be created");
+NLMNPClient nclient = new(mdm);
+Console.WriteLine("[INFO]: NLMNPClient was created");
+UnameResolver resolver = new(mdm, unnrpServer, unnrpTimeoutMs);
+Console.WriteLine(resolver.Enabled
+    ? $"[INFO]: Names are resolved through the UNNRP server {unnrpServer}"
+    : "[INFO]: No UNNRP server in config.txt (line 5): only tetronet addresses can be opened");
 
 Console.WriteLine("[PROCESS]: Obtaing mappings \"file-extension -> MIME-type\" using ASP.NET...");
 var contentTypes = new FileExtensionContentTypeProvider();
 Console.WriteLine("[INFO]: Obtained successfully.");
 
-app.MapGet("/{address}/{resource}", async (string address, string resource, HttpContext ctx) =>
+app.MapMethods("/{address}/{resource}", ["POST", "GET"], async (string address, string resource, HttpContext ctx) =>
 {
     var ip = ctx.Connection.RemoteIpAddress;
     if (ip is { IsIPv4MappedToIPv6: true }) ip = ip.MapToIPv4();
     Console.WriteLine($"[EVENT]: New Http request received from {ip}:{ctx.Connection.RemotePort}");
     Console.WriteLine($"[INFO]: Http fetched tetronet address {address} and resource name {resource}");
+    UnameResolver.Result resolved = await Task.Run(() => resolver.Resolve(address));
+    if (resolved.Address == null)
+    {
+        Console.WriteLine($"[WARNING]: {resolved.Error}");
+        return Results.Text(resolved.Error, statusCode: resolved.StatusCode);
+    }
+    Address target = resolved.Address;
+    if (ctx.Request.Method == "POST")
+    {
+        FileStream fsPost;
+        try
+        {
+            fsPost = new(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")),
+                FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 81920, FileOptions.DeleteOnClose);
+            POSTPendingRequest body = new(fsPost, 300000); // in milliseconds timeout
+            await ctx.Request.Body.CopyToAsync(body.Data);
+            body.Seal(); // rewind and hash, otherwise the LMDTP server would send 0 bytes
+            string tempresname = Guid.NewGuid().ToString();
+            resprov.Resources.TryAdd(tempresname, body);
+            Console.WriteLine("[EVENT]: POST request attached to the LMDTP server");
+            try
+            {
+                nclient.Notify(target, mdm.LocalModemAddress, tempresname); // notify the remote side that we have a large message to obtain
+            }
+            catch (TimeoutException)
+            {
+                Console.WriteLine("[WARNING]: Large message notification has timed out, which can sometimes mean that the remote server which is the user is asking to send a POST request to may be dead.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[ERROR]: POST request processing failed " + ex);
+        }
+    }
 
     Stopwatch swTotal = Stopwatch.StartNew();
-    LMDTPClient client = new(mdm, new(address), (uint)Random.Shared.Next(1000000000, 1200000000), 20000000);
+    LMDTPClient client = new(mdm, target, (uint)Random.Shared.Next(1000000000, 1200000000), 20000000);
     Exception? lmdtpError = null;
     client.ErrorOccured += e =>
     {
