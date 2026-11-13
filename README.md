@@ -20,6 +20,7 @@ Tetronet needed them, so now we have a service called **freeUname**, which resol
 <lmdtp request time in milliseconds>
 <maximum resource size>
 <tetronet uname resolver>
+<uname resolve timeout>
 ```
 ### Config example
 ```
@@ -28,5 +29,6 @@ ws://192.168.0.121:30500/
 30000
 268435456
 7-003
+5000
 ```
 NOTE: don't forget to swap 192.168.0.121 with your actual CIAS for the Tetronet. Protocol is always RAWWS.
